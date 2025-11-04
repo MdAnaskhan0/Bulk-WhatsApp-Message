@@ -2,6 +2,8 @@ const express = require('express');
 const cors = require('cors');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode');
+const path = require('path');
+const fs = require('fs');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -12,13 +14,39 @@ app.use(express.json());
 // Store active clients and their info
 const activeClients = new Map();
 const clientInfo = new Map();
-const qrCodes = new Map(); // Store QR codes separately
+const qrCodes = new Map();
+const clientInitializing = new Map(); // Track clients being initialized
 
-// WhatsApp client initialization
+// WhatsApp client initialization with better error handling
 function initializeWhatsAppClient(sessionId = 'default') {
     return new Promise((resolve, reject) => {
+        // Check if already initializing
+        if (clientInitializing.has(sessionId)) {
+            return reject(new Error('Client is already being initialized'));
+        }
+
+        clientInitializing.set(sessionId, true);
+
+        // Clean up any existing client for this session
+        if (activeClients.has(sessionId)) {
+            const existingClient = activeClients.get(sessionId);
+            try {
+                existingClient.destroy().catch(console.error);
+            } catch (error) {
+                console.error('Error destroying existing client:', error);
+            }
+            activeClients.delete(sessionId);
+            clientInfo.delete(sessionId);
+        }
+
+        // Clear any existing QR code
+        qrCodes.delete(sessionId);
+
         const client = new Client({
-            authStrategy: new LocalAuth({ clientId: sessionId }),
+            authStrategy: new LocalAuth({
+                clientId: sessionId,
+                dataPath: path.join(__dirname, 'sessions')
+            }),
             puppeteer: {
                 headless: true,
                 args: [
@@ -28,12 +56,45 @@ function initializeWhatsAppClient(sessionId = 'default') {
                     '--disable-accelerated-2d-canvas',
                     '--no-first-run',
                     '--no-zygote',
-                    '--disable-gpu'
-                ]
+                    '--disable-gpu',
+                    '--single-process'
+                ],
+                timeout: 60000
+            },
+            webVersionCache: {
+                type: 'remote',
+                remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html',
             }
         });
 
         let qrGenerated = false;
+        let isResolved = false;
+
+        const resolveOnce = (result) => {
+            if (!isResolved) {
+                isResolved = true;
+                clientInitializing.delete(sessionId);
+                resolve(result);
+            }
+        };
+
+        const rejectOnce = (error) => {
+            if (!isResolved) {
+                isResolved = true;
+                clientInitializing.delete(sessionId);
+
+                // Clean up on rejection
+                try {
+                    client.destroy().catch(() => { });
+                } catch (e) { }
+
+                activeClients.delete(sessionId);
+                clientInfo.delete(sessionId);
+                qrCodes.delete(sessionId);
+
+                reject(error);
+            }
+        };
 
         client.on('qr', async (qr) => {
             console.log('QR Received for session:', sessionId);
@@ -45,15 +106,16 @@ function initializeWhatsAppClient(sessionId = 'default') {
 
                 // Only resolve if this is the first QR code
                 if (!activeClients.has(sessionId)) {
-                    resolve({
+                    resolveOnce({
                         client,
                         qr: qrImage,
                         status: 'qr_generated'
                     });
                 }
             } catch (error) {
+                console.error('QR generation error:', error);
                 if (!activeClients.has(sessionId)) {
-                    reject(error);
+                    rejectOnce(error);
                 }
             }
         });
@@ -64,6 +126,7 @@ function initializeWhatsAppClient(sessionId = 'default') {
 
             activeClients.set(sessionId, client);
             qrCodes.delete(sessionId); // Remove QR code once connected
+            clientInitializing.delete(sessionId);
 
             clientInfo.set(sessionId, {
                 connected: true,
@@ -73,8 +136,8 @@ function initializeWhatsAppClient(sessionId = 'default') {
             });
 
             // If client becomes ready during initialization, resolve with connected status
-            if (!qrGenerated) {
-                resolve({
+            if (!qrGenerated && !isResolved) {
+                resolveOnce({
                     client,
                     status: 'already_connected'
                 });
@@ -89,16 +152,20 @@ function initializeWhatsAppClient(sessionId = 'default') {
         client.on('auth_failure', (msg) => {
             console.error('Authentication failure:', msg);
             qrCodes.delete(sessionId);
-            if (!activeClients.has(sessionId)) {
-                reject(new Error('Authentication failed: ' + msg));
+            if (!activeClients.has(sessionId) && !isResolved) {
+                rejectOnce(new Error('Authentication failed: ' + msg));
             }
         });
 
         client.on('disconnected', (reason) => {
-            console.log('Client was logged out', reason);
+            console.log('Client was logged out:', reason);
             activeClients.delete(sessionId);
             clientInfo.delete(sessionId);
             qrCodes.delete(sessionId);
+            clientInitializing.delete(sessionId);
+
+            // Clean up session files if needed
+            cleanupSessionFiles(sessionId);
         });
 
         client.on('message', message => {
@@ -111,20 +178,55 @@ function initializeWhatsAppClient(sessionId = 'default') {
             }
         });
 
-        // Initialize client
+        // Handle client errors
+        client.on('error', (error) => {
+            console.error('Client error for session', sessionId, ':', error);
+
+            if (!isResolved) {
+                rejectOnce(error);
+            }
+        });
+
+        // Initialize client with better error handling
         client.initialize().catch(error => {
-            if (!activeClients.has(sessionId)) {
-                reject(error);
+            console.error('Client initialization error:', error);
+            if (!activeClients.has(sessionId) && !isResolved) {
+                rejectOnce(error);
             }
         });
 
         // Set timeout for QR code generation
-        setTimeout(() => {
-            if (!qrGenerated && !activeClients.has(sessionId)) {
-                reject(new Error('QR code generation timeout'));
+        const timeout = setTimeout(() => {
+            if (!qrGenerated && !activeClients.has(sessionId) && !isResolved) {
+                console.log('QR code generation timeout for session:', sessionId);
+
+                // Clean up the client
+                try {
+                    client.destroy().catch(() => { });
+                } catch (e) { }
+
+                rejectOnce(new Error('QR code generation timeout - please try again'));
             }
-        }, 30000); // 30 seconds timeout
+        }, 45000); // 45 seconds timeout
+
+        // Clear timeout if resolved
+        if (isResolved) {
+            clearTimeout(timeout);
+        }
     });
+}
+
+// Function to cleanup session files
+function cleanupSessionFiles(sessionId) {
+    try {
+        const sessionPath = path.join(__dirname, 'sessions', `session-${sessionId}`);
+        if (fs.existsSync(sessionPath)) {
+            fs.rmSync(sessionPath, { recursive: true, force: true });
+            console.log('Cleaned up session files for:', sessionId);
+        }
+    } catch (error) {
+        console.error('Error cleaning up session files:', error);
+    }
 }
 
 // Function to format Bangladesh numbers
@@ -162,15 +264,17 @@ app.get('/', (req, res) => {
     });
 });
 
-// Initialize WhatsApp
+// Initialize WhatsApp with improved error handling
 app.post('/api/initialize', async (req, res) => {
     try {
         const { sessionId = 'default' } = req.body;
 
-        // Check if already connected
+        console.log('Initializing WhatsApp for session:', sessionId);
+
+        // Check if already connected and ready
         if (activeClients.has(sessionId)) {
             const client = activeClients.get(sessionId);
-            if (client.info) {
+            if (client.info && client.info.wid) {
                 return res.json({
                     status: 'already_connected',
                     message: 'WhatsApp is already connected'
@@ -178,7 +282,15 @@ app.post('/api/initialize', async (req, res) => {
             }
         }
 
-        // Check if QR code already exists
+        // Check if already initializing
+        if (clientInitializing.has(sessionId)) {
+            return res.status(409).json({
+                error: 'Client is already being initialized',
+                message: 'Please wait for the current initialization to complete'
+            });
+        }
+
+        // Check if QR code already exists and is still valid
         if (qrCodes.has(sessionId)) {
             return res.json({
                 status: 'qr_generated',
@@ -203,9 +315,15 @@ app.post('/api/initialize', async (req, res) => {
         }
     } catch (error) {
         console.error('Initialization error:', error);
+
+        // Clean up on error
+        const sessionId = req.body.sessionId || 'default';
+        clientInitializing.delete(sessionId);
+
         res.status(500).json({
             error: error.message,
-            details: 'Failed to initialize WhatsApp client'
+            details: 'Failed to initialize WhatsApp client',
+            solution: 'Please try again. If the problem persists, restart the server.'
         });
     }
 });
@@ -215,6 +333,7 @@ app.get('/api/status/:sessionId?', (req, res) => {
     const sessionId = req.params.sessionId || 'default';
     const client = activeClients.get(sessionId);
     const qrCode = qrCodes.get(sessionId);
+    const isInitializing = clientInitializing.has(sessionId);
 
     const isConnected = client && client.info ? true : false;
     const hasQr = !!qrCode;
@@ -223,8 +342,9 @@ app.get('/api/status/:sessionId?', (req, res) => {
         connected: isConnected,
         ready: isConnected,
         hasQr: hasQr,
+        initializing: isInitializing,
         sessionId: sessionId,
-        state: isConnected ? 'connected' : hasQr ? 'qr_pending' : 'disconnected'
+        state: isConnected ? 'connected' : hasQr ? 'qr_pending' : isInitializing ? 'initializing' : 'disconnected'
     });
 });
 
@@ -253,7 +373,7 @@ app.get('/api/client-info/:sessionId?', (req, res) => {
     const info = clientInfo.get(sessionId);
     const client = activeClients.get(sessionId);
 
-    if (info && client) {
+    if (info && client && client.info) {
         res.json({
             connected: true,
             phoneNumber: info.phoneNumber,
@@ -281,6 +401,14 @@ app.post('/api/send-bulk', async (req, res) => {
             return res.status(400).json({
                 error: 'WhatsApp client not connected',
                 solution: 'Please initialize and connect WhatsApp first'
+            });
+        }
+
+        // Check if client is actually ready
+        if (!client.info) {
+            return res.status(400).json({
+                error: 'WhatsApp client not ready',
+                solution: 'Please wait for WhatsApp to fully connect'
             });
         }
 
@@ -407,79 +535,6 @@ app.post('/api/send-bulk', async (req, res) => {
     }
 });
 
-// Send test message to single number
-app.post('/api/send-test', async (req, res) => {
-    try {
-        const { number, message, sessionId = 'default' } = req.body;
-        const client = activeClients.get(sessionId);
-
-        if (!client) {
-            return res.status(400).json({
-                error: 'WhatsApp client not connected',
-                solution: 'Please initialize and connect WhatsApp first'
-            });
-        }
-
-        if (!number) {
-            return res.status(400).json({
-                error: 'Phone number is required'
-            });
-        }
-
-        if (!message || message.trim() === '') {
-            return res.status(400).json({
-                error: 'Message is required'
-            });
-        }
-
-        // Format Bangladesh number
-        const formattedNumber = formatBangladeshNumber(number);
-        const chatId = `${formattedNumber}@c.us`;
-
-        console.log(`Testing number: ${number} -> ${formattedNumber}`);
-
-        // Validate formatted number
-        if (formattedNumber.length !== 13 || !formattedNumber.startsWith('880')) {
-            return res.status(400).json({
-                error: 'Invalid Bangladesh number format',
-                originalNumber: number,
-                formattedNumber: formattedNumber,
-                expectedFormat: '13 digits starting with 880'
-            });
-        }
-
-        const isRegistered = await client.isRegisteredUser(chatId);
-
-        if (!isRegistered) {
-            return res.status(400).json({
-                error: 'Number not registered on WhatsApp',
-                originalNumber: number,
-                formattedNumber: formattedNumber,
-                status: 'not_registered'
-            });
-        }
-
-        const sentMessage = await client.sendMessage(chatId, message);
-
-        res.json({
-            success: true,
-            message: 'Test message sent successfully',
-            originalNumber: number,
-            formattedNumber: formattedNumber,
-            messageId: sentMessage.id._serialized,
-            timestamp: new Date().toISOString()
-        });
-
-    } catch (error) {
-        console.error('Test send error:', error);
-        res.status(500).json({
-            error: error.message,
-            originalNumber: req.body.number,
-            details: 'Failed to send test message'
-        });
-    }
-});
-
 // Validate Bangladesh numbers
 app.post('/api/validate-numbers', async (req, res) => {
     try {
@@ -530,54 +585,88 @@ app.post('/api/validate-numbers', async (req, res) => {
     }
 });
 
-// Get all active sessions
-app.get('/api/sessions', (req, res) => {
-    const sessions = [];
-
-    activeClients.forEach((client, sessionId) => {
-        const info = clientInfo.get(sessionId);
-        sessions.push({
-            sessionId,
-            connected: !!client.info,
-            phoneNumber: info?.phoneNumber,
-            name: info?.name,
-            ready: client.info ? true : false
-        });
-    });
-
-    res.json({
-        totalSessions: sessions.length,
-        sessions: sessions
-    });
-});
-
-// Disconnect WhatsApp
+// Disconnect WhatsApp with improved cleanup
 app.post('/api/disconnect/:sessionId?', async (req, res) => {
     try {
         const sessionId = req.params.sessionId || 'default';
         const client = activeClients.get(sessionId);
 
         if (client) {
+            console.log('Disconnecting client for session:', sessionId);
             await client.destroy();
             activeClients.delete(sessionId);
             clientInfo.delete(sessionId);
             qrCodes.delete(sessionId);
+            clientInitializing.delete(sessionId);
+
+            // Clean up session files
+            cleanupSessionFiles(sessionId);
 
             res.json({
                 message: 'Disconnected successfully',
                 sessionId: sessionId
             });
         } else {
-            res.status(400).json({
-                error: 'No active connection found',
+            // Clean up any residual data
+            activeClients.delete(sessionId);
+            clientInfo.delete(sessionId);
+            qrCodes.delete(sessionId);
+            clientInitializing.delete(sessionId);
+            cleanupSessionFiles(sessionId);
+
+            res.json({
+                message: 'No active connection found - cleaned up residual data',
                 sessionId: sessionId
             });
         }
     } catch (error) {
         console.error('Disconnect error:', error);
+
+        // Force cleanup on error
+        const sessionId = req.params.sessionId || 'default';
+        activeClients.delete(sessionId);
+        clientInfo.delete(sessionId);
+        qrCodes.delete(sessionId);
+        clientInitializing.delete(sessionId);
+        cleanupSessionFiles(sessionId);
+
         res.status(500).json({
             error: error.message,
-            details: 'Failed to disconnect WhatsApp'
+            details: 'Failed to disconnect WhatsApp - forced cleanup performed'
+        });
+    }
+});
+
+// Force cleanup endpoint
+app.post('/api/force-cleanup/:sessionId?', async (req, res) => {
+    try {
+        const sessionId = req.params.sessionId || 'default';
+
+        // Clean up all data for session
+        if (activeClients.has(sessionId)) {
+            const client = activeClients.get(sessionId);
+            try {
+                await client.destroy();
+            } catch (error) {
+                console.error('Error destroying client during force cleanup:', error);
+            }
+        }
+
+        activeClients.delete(sessionId);
+        clientInfo.delete(sessionId);
+        qrCodes.delete(sessionId);
+        clientInitializing.delete(sessionId);
+        cleanupSessionFiles(sessionId);
+
+        res.json({
+            message: 'Force cleanup completed',
+            sessionId: sessionId
+        });
+    } catch (error) {
+        console.error('Force cleanup error:', error);
+        res.status(500).json({
+            error: error.message,
+            details: 'Failed to perform force cleanup'
         });
     }
 });
@@ -590,6 +679,7 @@ app.get('/api/health', (req, res) => {
         uptime: process.uptime(),
         activeSessions: activeClients.size,
         pendingQrSessions: qrCodes.size,
+        initializingSessions: clientInitializing.size,
         memory: process.memoryUsage()
     });
 });
@@ -618,6 +708,23 @@ app.listen(PORT, () => {
     console.log(`🇧🇩 Bangladesh number support enabled`);
     console.log(`📋 Supported formats: 01981380806, 8801981380806, +8801981380806, 1981380806`);
     console.log(`💡 Make sure to allow the required permissions for WhatsApp Web`);
+});
+
+// Handle graceful shutdown
+process.on('SIGINT', async () => {
+    console.log('\n🛑 Shutting down server gracefully...');
+
+    // Destroy all active clients
+    for (const [sessionId, client] of activeClients) {
+        try {
+            await client.destroy();
+            console.log(`Destroyed client for session: ${sessionId}`);
+        } catch (error) {
+            console.error(`Error destroying client for session ${sessionId}:`, error);
+        }
+    }
+
+    process.exit(0);
 });
 
 module.exports = app;
