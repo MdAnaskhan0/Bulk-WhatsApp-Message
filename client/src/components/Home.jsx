@@ -15,6 +15,7 @@ import { FaRegCircleUser } from "react-icons/fa6";
 import axios from 'axios';
 import { Link } from 'react-router-dom';
 import { toast } from 'react-toastify';
+import SiteLogo from '../assets/SiteLogo.png';
 
 const Home = ({ isConnected, status, clientInfo, setIsConnected, setStatus, setClientInfo }) => {
     const [isLoading, setIsLoading] = useState(false);
@@ -132,8 +133,8 @@ const Home = ({ isConnected, status, clientInfo, setIsConnected, setStatus, setC
             <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-16">
                 <div className="text-center">
                     <div className="flex items-center justify-center gap-4 mb-8">
-                        <div className="p-4 bg-gradient-to-r from-emerald-500 to-green-500 rounded-2xl shadow-lg">
-                            <FaWhatsapp className="text-3xl text-white" />
+                        <div className="p-1 bg-gradient-to-r from-emerald-500 to-green-500 rounded-2xl shadow-lg">
+                            <img src={SiteLogo} alt="logo" className='w-12'/>
                         </div>
                         <div>
                             <h1 className="text-2xl font-bold text-gray-900 bg-gradient-to-r from-gray-900 to-gray-700 bg-clip-text text-transparent">

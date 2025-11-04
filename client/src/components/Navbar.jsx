@@ -2,6 +2,7 @@ import React from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { FaWhatsapp, FaPaperPlane, FaComments, FaUser, FaSignOutAlt } from 'react-icons/fa';
 import axios from 'axios';
+import SiteLogo from '../assets/SiteLogo.png';
 
 const Navbar = ({ clientInfo }) => {
     const location = useLocation();
@@ -26,8 +27,8 @@ const Navbar = ({ clientInfo }) => {
                 <div className="flex justify-between items-center h-16">
                     {/* Logo and Brand */}
                     <div className="flex items-center gap-3">
-                        <div className="p-2 bg-emerald-500 rounded-lg">
-                            <Link to="/"><FaWhatsapp className="text-xl text-white" /></Link>
+                        <div className="p-0.5 bg-emerald-500 rounded-lg">
+                            <Link to="/"><img src={SiteLogo} alt="Logo" className='w-10'/></Link>
                         </div>
                         <div>
                             <Link to="/" className="flex flex-col">
