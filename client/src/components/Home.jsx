@@ -134,7 +134,7 @@ const Home = ({ isConnected, status, clientInfo, setIsConnected, setStatus, setC
                 <div className="text-center">
                     <div className="flex items-center justify-center gap-4 mb-8">
                         <div className="p-1 bg-gradient-to-r from-emerald-500 to-green-500 rounded-2xl shadow-lg">
-                            <img src={SiteLogo} alt="logo" className='w-12'/>
+                            <img src={SiteLogo} alt="logo" className='w-12' />
                         </div>
                         <div>
                             <h1 className="text-2xl font-bold text-gray-900 bg-gradient-to-r from-gray-900 to-gray-700 bg-clip-text text-transparent">
@@ -183,14 +183,13 @@ const Home = ({ isConnected, status, clientInfo, setIsConnected, setStatus, setC
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
             <div className="text-center mb-12">
                 <div className="flex items-center justify-center gap-4 mb-6">
-                    <div className="p-4 bg-gradient-to-r from-emerald-500 to-green-500 rounded-2xl shadow-lg">
-                        <FaWhatsapp className="text-3xl text-white" />
+                    <div className="p-2 bg-gradient-to-r from-emerald-500 to-green-500 rounded-2xl shadow-lg">
+                        <img src={SiteLogo} alt="Logo" className='w-12'/>
                     </div>
                     <div>
-                        <h1 className="text-4xl font-bold text-gray-900 bg-gradient-to-r from-gray-900 to-gray-700 bg-clip-text text-transparent">
+                        <h1 className="text-2xl font-bold text-gray-900 bg-gradient-to-r from-gray-900 to-gray-700 bg-clip-text text-transparent">
                             WhatsApp Bulk Messenger
                         </h1>
-                        <p className="text-gray-600 mt-2 text-lg">Professional messaging platform for businesses</p>
                     </div>
                 </div>
             </div>

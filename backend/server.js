@@ -1,15 +1,44 @@
 const express = require('express');
 const cors = require('cors');
-const { Client, LocalAuth } = require('whatsapp-web.js');
+const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode');
 const path = require('path');
 const fs = require('fs');
+const multer = require('multer');
+const mime = require('mime-types');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
 app.use(cors());
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// Configure multer for file uploads
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        const uploadDir = path.join(__dirname, 'uploads');
+        if (!fs.existsSync(uploadDir)) {
+            fs.mkdirSync(uploadDir, { recursive: true });
+        }
+        cb(null, uploadDir);
+    },
+    filename: (req, file, cb) => {
+        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+        cb(null, file.fieldname + '-' + uniqueSuffix + '.' + mime.extension(file.mimetype));
+    }
+});
+
+const upload = multer({
+    storage: storage,
+    limits: {
+        fileSize: 50 * 1024 * 1024, // 50MB limit
+    },
+    fileFilter: (req, file, cb) => {
+        // Allow all file types for WhatsApp
+        cb(null, true);
+    }
+});
 
 // Store active clients and their info
 const activeClients = new Map();
@@ -255,12 +284,24 @@ function formatBangladeshNumber(number) {
     return cleanNumber;
 }
 
+// Function to create MessageMedia from file
+async function createMediaFromFile(filePath, caption = '') {
+    try {
+        const media = MessageMedia.fromFilePath(filePath);
+        return media;
+    } catch (error) {
+        console.error('Error creating media from file:', error);
+        throw error;
+    }
+}
+
 // Routes
 app.get('/', (req, res) => {
     res.json({
         message: 'WhatsApp Bulk Sender API',
         version: '1.0.0',
-        status: 'running'
+        status: 'running',
+        features: ['text_messages', 'file_sharing']
     });
 });
 
@@ -391,10 +432,43 @@ app.get('/api/client-info/:sessionId?', (req, res) => {
     }
 });
 
-// Send bulk messages
+// Upload file endpoint
+app.post('/api/upload-file', upload.single('file'), async (req, res) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({
+                error: 'No file uploaded'
+            });
+        }
+
+        const fileInfo = {
+            filename: req.file.filename,
+            originalname: req.file.originalname,
+            mimetype: req.file.mimetype,
+            size: req.file.size,
+            path: req.file.path,
+            uploadTime: new Date().toISOString()
+        };
+
+        res.json({
+            success: true,
+            message: 'File uploaded successfully',
+            file: fileInfo
+        });
+
+    } catch (error) {
+        console.error('File upload error:', error);
+        res.status(500).json({
+            error: error.message,
+            details: 'Failed to upload file'
+        });
+    }
+});
+
+// Send bulk messages with file support
 app.post('/api/send-bulk', async (req, res) => {
     try {
-        const { numbers, message, sessionId = 'default' } = req.body;
+        const { numbers, message, filePath, fileName, sessionId = 'default' } = req.body;
         const client = activeClients.get(sessionId);
 
         if (!client) {
@@ -418,9 +492,10 @@ app.post('/api/send-bulk', async (req, res) => {
             });
         }
 
-        if (!message || message.trim() === '') {
+        // At least one of message or file should be provided
+        if ((!message || message.trim() === '') && !filePath) {
             return res.status(400).json({
-                error: 'Message is required and cannot be empty'
+                error: 'Either message or file is required'
             });
         }
 
@@ -430,6 +505,25 @@ app.post('/api/send-bulk', async (req, res) => {
                 error: 'Too many numbers',
                 message: 'Maximum 100 numbers allowed per request'
             });
+        }
+
+        let media = null;
+        if (filePath) {
+            try {
+                // Check if file exists
+                if (!fs.existsSync(filePath)) {
+                    return res.status(400).json({
+                        error: 'File not found',
+                        details: `File path: ${filePath}`
+                    });
+                }
+                media = await createMediaFromFile(filePath, message);
+            } catch (error) {
+                return res.status(400).json({
+                    error: 'Failed to load file',
+                    details: error.message
+                });
+            }
         }
 
         const results = [];
@@ -464,17 +558,28 @@ app.post('/api/send-bulk', async (req, res) => {
                     const isRegistered = await client.isRegisteredUser(chatId);
 
                     if (isRegistered) {
-                        console.log(`Sending message to ${formattedNumber}...`);
-                        const sentMessage = await client.sendMessage(chatId, message);
+                        console.log(`Sending ${media ? 'file' : 'message'} to ${formattedNumber}...`);
+
+                        let sentMessage;
+                        if (media) {
+                            // Send file with optional caption
+                            sentMessage = await client.sendMessage(chatId, media, {
+                                caption: message || ''
+                            });
+                        } else {
+                            // Send text message only
+                            sentMessage = await client.sendMessage(chatId, message);
+                        }
 
                         results.push({
                             number,
                             formattedNumber,
                             status: 'sent',
-                            messageId: sentMessage.id._serialized
+                            messageId: sentMessage.id._serialized,
+                            type: media ? 'file' : 'text'
                         });
                         sentNumbers.push(number);
-                        console.log(`✓ Message sent to ${formattedNumber}`);
+                        console.log(`✓ ${media ? 'File' : 'Message'} sent to ${formattedNumber}`);
                     } else {
                         results.push({
                             number,
@@ -520,7 +625,8 @@ app.post('/api/send-bulk', async (req, res) => {
             notRegisteredNumbers,
             details: results,
             sessionId: sessionId,
-            timestamp: new Date().toISOString()
+            timestamp: new Date().toISOString(),
+            type: media ? 'file' : 'text'
         };
 
         console.log(`Bulk send completed: ${sentNumbers.length} sent, ${failedNumbers.length} failed`);
@@ -705,6 +811,7 @@ app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
     console.log(`📱 WhatsApp Bulk Sender API Started`);
     console.log(`🌐 Base URL: http://localhost:${PORT}`);
+    console.log(`📎 File upload support enabled`);
     console.log(`🇧🇩 Bangladesh number support enabled`);
     console.log(`📋 Supported formats: 01981380806, 8801981380806, +8801981380806, 1981380806`);
     console.log(`💡 Make sure to allow the required permissions for WhatsApp Web`);
