@@ -266,8 +266,9 @@ const BulkMessage = ({ clientInfo }) => {
 Example:
 01981380806
 01812345678
-01798765432"
-                            rows="5"
+01798765432
+Max 499 numbers."
+                            rows="6"
                             className="w-full px-4 py-4 border-2 border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 resize-vertical font-mono text-sm bg-gray-50 transition-all duration-200"
                         />
                     </div>
