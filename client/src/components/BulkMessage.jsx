@@ -5,7 +5,8 @@ import {
     FaCheckCircle,
     FaFileUpload,
     FaFile,
-    FaTimes
+    FaTimes,
+    FaMemory
 } from 'react-icons/fa';
 import axios from 'axios';
 import { toast } from 'react-toastify';
@@ -24,7 +25,6 @@ const BulkMessage = ({ clientInfo }) => {
         const file = event.target.files[0];
         if (!file) return;
 
-        // Check file size (50MB limit)
         if (file.size > 50 * 1024 * 1024) {
             toast.error('File size too large. Maximum 50MB allowed.', {
                 position: "top-right",
@@ -45,7 +45,7 @@ const BulkMessage = ({ clientInfo }) => {
             });
 
             setSelectedFile(response.data.file);
-            toast.success('File uploaded successfully!', {
+            toast.success('File uploaded to memory successfully!', {
                 position: "top-right",
                 autoClose: 3000,
             });
@@ -57,6 +57,8 @@ const BulkMessage = ({ clientInfo }) => {
             });
         } finally {
             setIsUploading(false);
+            // Clear the file input
+            event.target.value = '';
         }
     };
 
@@ -128,7 +130,6 @@ const BulkMessage = ({ clientInfo }) => {
             return;
         }
 
-        // At least one of message or file should be provided
         if (!message.trim() && !selectedFile) {
             toast.warning('Please enter a message or upload a file', {
                 position: "top-right",
@@ -152,6 +153,9 @@ const BulkMessage = ({ clientInfo }) => {
                     {selectedFile && (
                         <div className="text-sm">File: {selectedFile.originalname}</div>
                     )}
+                    <div className="text-xs text-gray-500 mt-1">
+                        📦 Files are stored in memory and auto-cleaned
+                    </div>
                 </div>,
                 {
                     position: "top-right",
@@ -164,8 +168,7 @@ const BulkMessage = ({ clientInfo }) => {
                 numbers: numbersArray,
                 message: message,
                 ...(selectedFile && {
-                    filePath: selectedFile.path,
-                    fileName: selectedFile.originalname
+                    fileId: selectedFile.fileId
                 })
             };
 
@@ -209,6 +212,11 @@ const BulkMessage = ({ clientInfo }) => {
                 );
 
                 console.log('Failed numbers:', failedNumbers);
+            }
+
+            // Clear the file after successful send
+            if (selectedFile) {
+                setSelectedFile(null);
             }
         } catch (error) {
             console.error('Error sending messages:', error);
@@ -282,7 +290,7 @@ Example:
                             File Attachment
                         </label>
                         <span className="text-sm text-gray-500 font-medium">
-                            Optional - Max 50MB
+                            Optional - Max 50MB - Memory Storage
                         </span>
                     </div>
 
@@ -309,7 +317,8 @@ Example:
                                         {isUploading ? 'Uploading...' : 'Click to upload file'}
                                     </div>
                                     <div className="text-sm text-gray-500 mt-1">
-                                        Supports all file types (Images, PDF, Documents, etc.)
+                                        <FaMemory className="inline mr-1" />
+                                        Stored in memory - auto cleaned after sending
                                     </div>
                                 </div>
                             </label>
@@ -325,6 +334,10 @@ Example:
                                         </div>
                                         <div className="text-sm text-gray-600">
                                             {formatFileSize(selectedFile.size)} • {selectedFile.mimetype}
+                                        </div>
+                                        <div className="text-xs text-emerald-600 mt-1">
+                                            <FaMemory className="inline mr-1" />
+                                            Stored in memory
                                         </div>
                                     </div>
                                 </div>
@@ -388,7 +401,7 @@ Example:
                 <div className="mt-4 text-center">
                     <p className="text-sm text-gray-500">
                         {selectedFile
-                            ? '📎 File will be shared with optional caption'
+                            ? '📎 File will be shared with optional caption (stored in memory)'
                             : '💡 You can send text messages or files with captions'
                         }
                     </p>

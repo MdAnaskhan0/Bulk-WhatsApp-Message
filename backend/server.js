@@ -5,30 +5,16 @@ const qrcode = require('qrcode');
 const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
-const mime = require('mime-types');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
 app.use(cors());
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// Configure multer for file uploads
-const storage = multer.diskStorage({
-    destination: (req, file, cb) => {
-        const uploadDir = path.join(__dirname, 'uploads');
-        if (!fs.existsSync(uploadDir)) {
-            fs.mkdirSync(uploadDir, { recursive: true });
-        }
-        cb(null, uploadDir);
-    },
-    filename: (req, file, cb) => {
-        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-        cb(null, file.fieldname + '-' + uniqueSuffix + '.' + mime.extension(file.mimetype));
-    }
-});
-
+// Configure multer for memory storage (no disk storage)
+const storage = multer.memoryStorage();
 const upload = multer({
     storage: storage,
     limits: {
@@ -44,12 +30,25 @@ const upload = multer({
 const activeClients = new Map();
 const clientInfo = new Map();
 const qrCodes = new Map();
-const clientInitializing = new Map(); // Track clients being initialized
+const clientInitializing = new Map();
+
+// Store temporary file data in memory (expires after some time)
+const temporaryFiles = new Map();
+
+// Clean up temporary files every hour
+setInterval(() => {
+    const now = Date.now();
+    for (const [fileId, fileData] of temporaryFiles) {
+        if (now - fileData.timestamp > 60 * 60 * 1000) { // 1 hour
+            temporaryFiles.delete(fileId);
+            console.log(`Cleaned up temporary file: ${fileId}`);
+        }
+    }
+}, 30 * 60 * 1000); // Run every 30 minutes
 
 // WhatsApp client initialization with better error handling
 function initializeWhatsAppClient(sessionId = 'default') {
     return new Promise((resolve, reject) => {
-        // Check if already initializing
         if (clientInitializing.has(sessionId)) {
             return reject(new Error('Client is already being initialized'));
         }
@@ -128,12 +127,10 @@ function initializeWhatsAppClient(sessionId = 'default') {
         client.on('qr', async (qr) => {
             console.log('QR Received for session:', sessionId);
             try {
-                // Generate QR code as base64 image
                 const qrImage = await qrcode.toDataURL(qr);
                 qrCodes.set(sessionId, qrImage);
                 qrGenerated = true;
 
-                // Only resolve if this is the first QR code
                 if (!activeClients.has(sessionId)) {
                     resolveOnce({
                         client,
@@ -154,7 +151,7 @@ function initializeWhatsAppClient(sessionId = 'default') {
             console.log('Connected as:', client.info.pushname, client.info.wid.user);
 
             activeClients.set(sessionId, client);
-            qrCodes.delete(sessionId); // Remove QR code once connected
+            qrCodes.delete(sessionId);
             clientInitializing.delete(sessionId);
 
             clientInfo.set(sessionId, {
@@ -164,7 +161,6 @@ function initializeWhatsAppClient(sessionId = 'default') {
                 wid: client.info.wid
             });
 
-            // If client becomes ready during initialization, resolve with connected status
             if (!qrGenerated && !isResolved) {
                 resolveOnce({
                     client,
@@ -175,7 +171,7 @@ function initializeWhatsAppClient(sessionId = 'default') {
 
         client.on('authenticated', () => {
             console.log('Authenticated!');
-            qrCodes.delete(sessionId); // Remove QR code once authenticated
+            qrCodes.delete(sessionId);
         });
 
         client.on('auth_failure', (msg) => {
@@ -192,8 +188,6 @@ function initializeWhatsAppClient(sessionId = 'default') {
             clientInfo.delete(sessionId);
             qrCodes.delete(sessionId);
             clientInitializing.delete(sessionId);
-
-            // Clean up session files if needed
             cleanupSessionFiles(sessionId);
         });
 
@@ -207,16 +201,13 @@ function initializeWhatsAppClient(sessionId = 'default') {
             }
         });
 
-        // Handle client errors
         client.on('error', (error) => {
             console.error('Client error for session', sessionId, ':', error);
-
             if (!isResolved) {
                 rejectOnce(error);
             }
         });
 
-        // Initialize client with better error handling
         client.initialize().catch(error => {
             console.error('Client initialization error:', error);
             if (!activeClients.has(sessionId) && !isResolved) {
@@ -224,21 +215,16 @@ function initializeWhatsAppClient(sessionId = 'default') {
             }
         });
 
-        // Set timeout for QR code generation
         const timeout = setTimeout(() => {
             if (!qrGenerated && !activeClients.has(sessionId) && !isResolved) {
                 console.log('QR code generation timeout for session:', sessionId);
-
-                // Clean up the client
                 try {
                     client.destroy().catch(() => { });
                 } catch (e) { }
-
                 rejectOnce(new Error('QR code generation timeout - please try again'));
             }
-        }, 45000); // 45 seconds timeout
+        }, 45000);
 
-        // Clear timeout if resolved
         if (isResolved) {
             clearTimeout(timeout);
         }
@@ -260,23 +246,14 @@ function cleanupSessionFiles(sessionId) {
 
 // Function to format Bangladesh numbers
 function formatBangladeshNumber(number) {
-    // Remove all non-digit characters
     let cleanNumber = number.toString().replace(/\D/g, '');
 
-    // If number starts with 0 (like 01981380806), remove the 0 and add 880
     if (cleanNumber.startsWith('0')) {
         cleanNumber = '880' + cleanNumber.substring(1);
     }
-    // If number starts with +880, remove the +
-    else if (cleanNumber.startsWith('880')) {
-        // Already in correct format, just ensure no +
-        cleanNumber = cleanNumber;
-    }
-    // If number starts with 880 but has +, remove it
     else if (cleanNumber.startsWith('880')) {
         cleanNumber = cleanNumber;
     }
-    // If number is 11 digits and starts with 1 (like 1981380806), add 880
     else if (cleanNumber.length === 10 && cleanNumber.startsWith('1')) {
         cleanNumber = '880' + cleanNumber;
     }
@@ -284,13 +261,14 @@ function formatBangladeshNumber(number) {
     return cleanNumber;
 }
 
-// Function to create MessageMedia from file
-async function createMediaFromFile(filePath, caption = '') {
+// Function to create MessageMedia from buffer
+function createMediaFromBuffer(buffer, mimeType, filename) {
     try {
-        const media = MessageMedia.fromFilePath(filePath);
+        const base64 = buffer.toString('base64');
+        const media = new MessageMedia(mimeType, base64, filename);
         return media;
     } catch (error) {
-        console.error('Error creating media from file:', error);
+        console.error('Error creating media from buffer:', error);
         throw error;
     }
 }
@@ -301,7 +279,7 @@ app.get('/', (req, res) => {
         message: 'WhatsApp Bulk Sender API',
         version: '1.0.0',
         status: 'running',
-        features: ['text_messages', 'file_sharing']
+        features: ['text_messages', 'file_sharing', 'memory_storage']
     });
 });
 
@@ -312,7 +290,6 @@ app.post('/api/initialize', async (req, res) => {
 
         console.log('Initializing WhatsApp for session:', sessionId);
 
-        // Check if already connected and ready
         if (activeClients.has(sessionId)) {
             const client = activeClients.get(sessionId);
             if (client.info && client.info.wid) {
@@ -323,7 +300,6 @@ app.post('/api/initialize', async (req, res) => {
             }
         }
 
-        // Check if already initializing
         if (clientInitializing.has(sessionId)) {
             return res.status(409).json({
                 error: 'Client is already being initialized',
@@ -331,7 +307,6 @@ app.post('/api/initialize', async (req, res) => {
             });
         }
 
-        // Check if QR code already exists and is still valid
         if (qrCodes.has(sessionId)) {
             return res.json({
                 status: 'qr_generated',
@@ -356,8 +331,6 @@ app.post('/api/initialize', async (req, res) => {
         }
     } catch (error) {
         console.error('Initialization error:', error);
-
-        // Clean up on error
         const sessionId = req.body.sessionId || 'default';
         clientInitializing.delete(sessionId);
 
@@ -432,7 +405,7 @@ app.get('/api/client-info/:sessionId?', (req, res) => {
     }
 });
 
-// Upload file endpoint
+// Upload file to memory (no disk storage)
 app.post('/api/upload-file', upload.single('file'), async (req, res) => {
     try {
         if (!req.file) {
@@ -441,18 +414,28 @@ app.post('/api/upload-file', upload.single('file'), async (req, res) => {
             });
         }
 
-        const fileInfo = {
-            filename: req.file.filename,
+        const fileId = Date.now().toString() + Math.random().toString(36).substr(2, 9);
+
+        // Store file in memory with expiration
+        temporaryFiles.set(fileId, {
+            buffer: req.file.buffer,
             originalname: req.file.originalname,
             mimetype: req.file.mimetype,
             size: req.file.size,
-            path: req.file.path,
+            timestamp: Date.now()
+        });
+
+        const fileInfo = {
+            fileId: fileId,
+            originalname: req.file.originalname,
+            mimetype: req.file.mimetype,
+            size: req.file.size,
             uploadTime: new Date().toISOString()
         };
 
         res.json({
             success: true,
-            message: 'File uploaded successfully',
+            message: 'File uploaded to memory successfully',
             file: fileInfo
         });
 
@@ -465,10 +448,10 @@ app.post('/api/upload-file', upload.single('file'), async (req, res) => {
     }
 });
 
-// Send bulk messages with file support
+// Send bulk messages with file support from memory
 app.post('/api/send-bulk', async (req, res) => {
     try {
-        const { numbers, message, filePath, fileName, sessionId = 'default' } = req.body;
+        const { numbers, message, fileId, sessionId = 'default' } = req.body;
         const client = activeClients.get(sessionId);
 
         if (!client) {
@@ -478,7 +461,6 @@ app.post('/api/send-bulk', async (req, res) => {
             });
         }
 
-        // Check if client is actually ready
         if (!client.info) {
             return res.status(400).json({
                 error: 'WhatsApp client not ready',
@@ -492,14 +474,12 @@ app.post('/api/send-bulk', async (req, res) => {
             });
         }
 
-        // At least one of message or file should be provided
-        if ((!message || message.trim() === '') && !filePath) {
+        if ((!message || message.trim() === '') && !fileId) {
             return res.status(400).json({
                 error: 'Either message or file is required'
             });
         }
 
-        // Validate numbers limit (prevent abuse)
         if (numbers.length > 100) {
             return res.status(400).json({
                 error: 'Too many numbers',
@@ -508,19 +488,28 @@ app.post('/api/send-bulk', async (req, res) => {
         }
 
         let media = null;
-        if (filePath) {
+        if (fileId) {
             try {
-                // Check if file exists
-                if (!fs.existsSync(filePath)) {
+                const fileData = temporaryFiles.get(fileId);
+                if (!fileData) {
                     return res.status(400).json({
-                        error: 'File not found',
-                        details: `File path: ${filePath}`
+                        error: 'File not found or expired',
+                        solution: 'Please upload the file again'
                     });
                 }
-                media = await createMediaFromFile(filePath, message);
+
+                media = createMediaFromBuffer(
+                    fileData.buffer,
+                    fileData.mimetype,
+                    fileData.originalname
+                );
+
+                // Remove file from memory after use to free up space
+                temporaryFiles.delete(fileId);
+
             } catch (error) {
                 return res.status(400).json({
-                    error: 'Failed to load file',
+                    error: 'Failed to process file',
                     details: error.message
                 });
             }
@@ -533,12 +522,9 @@ app.post('/api/send-bulk', async (req, res) => {
 
         for (const number of numbers) {
             try {
-                // Format Bangladesh number
                 const formattedNumber = formatBangladeshNumber(number);
-
                 console.log(`Processing: ${number} -> ${formattedNumber}`);
 
-                // Validate formatted number
                 if (formattedNumber.length !== 13 || !formattedNumber.startsWith('880')) {
                     results.push({
                         number,
@@ -552,7 +538,6 @@ app.post('/api/send-bulk', async (req, res) => {
 
                 const chatId = `${formattedNumber}@c.us`;
 
-                // Check if number exists on WhatsApp
                 try {
                     console.log(`Checking if ${formattedNumber} is registered...`);
                     const isRegistered = await client.isRegisteredUser(chatId);
@@ -562,12 +547,10 @@ app.post('/api/send-bulk', async (req, res) => {
 
                         let sentMessage;
                         if (media) {
-                            // Send file with optional caption
                             sentMessage = await client.sendMessage(chatId, media, {
                                 caption: message || ''
                             });
                         } else {
-                            // Send text message only
                             sentMessage = await client.sendMessage(chatId, message);
                         }
 
@@ -601,7 +584,7 @@ app.post('/api/send-bulk', async (req, res) => {
                     console.error(`Error for ${formattedNumber}:`, whatsappError.message);
                 }
 
-                // Delay to avoid rate limiting (2 seconds between messages)
+                // Delay to avoid rate limiting
                 await new Promise(resolve => setTimeout(resolve, 2000));
 
             } catch (error) {
@@ -691,6 +674,40 @@ app.post('/api/validate-numbers', async (req, res) => {
     }
 });
 
+// Clean up temporary files endpoint
+app.post('/api/cleanup-files', async (req, res) => {
+    try {
+        const deletedCount = temporaryFiles.size;
+        temporaryFiles.clear();
+
+        res.json({
+            message: 'Temporary files cleaned up successfully',
+            deletedCount: deletedCount
+        });
+    } catch (error) {
+        console.error('Cleanup error:', error);
+        res.status(500).json({
+            error: error.message,
+            details: 'Failed to clean up temporary files'
+        });
+    }
+});
+
+// Get memory usage info
+app.get('/api/memory-info', (req, res) => {
+    const memoryUsage = process.memoryUsage();
+    res.json({
+        temporaryFilesCount: temporaryFiles.size,
+        memoryUsage: {
+            rss: `${Math.round(memoryUsage.rss / 1024 / 1024)} MB`,
+            heapTotal: `${Math.round(memoryUsage.heapTotal / 1024 / 1024)} MB`,
+            heapUsed: `${Math.round(memoryUsage.heapUsed / 1024 / 1024)} MB`,
+            external: `${Math.round(memoryUsage.external / 1024 / 1024)} MB`
+        },
+        timestamp: new Date().toISOString()
+    });
+});
+
 // Disconnect WhatsApp with improved cleanup
 app.post('/api/disconnect/:sessionId?', async (req, res) => {
     try {
@@ -704,8 +721,6 @@ app.post('/api/disconnect/:sessionId?', async (req, res) => {
             clientInfo.delete(sessionId);
             qrCodes.delete(sessionId);
             clientInitializing.delete(sessionId);
-
-            // Clean up session files
             cleanupSessionFiles(sessionId);
 
             res.json({
@@ -713,7 +728,6 @@ app.post('/api/disconnect/:sessionId?', async (req, res) => {
                 sessionId: sessionId
             });
         } else {
-            // Clean up any residual data
             activeClients.delete(sessionId);
             clientInfo.delete(sessionId);
             qrCodes.delete(sessionId);
@@ -727,8 +741,6 @@ app.post('/api/disconnect/:sessionId?', async (req, res) => {
         }
     } catch (error) {
         console.error('Disconnect error:', error);
-
-        // Force cleanup on error
         const sessionId = req.params.sessionId || 'default';
         activeClients.delete(sessionId);
         clientInfo.delete(sessionId);
@@ -748,7 +760,6 @@ app.post('/api/force-cleanup/:sessionId?', async (req, res) => {
     try {
         const sessionId = req.params.sessionId || 'default';
 
-        // Clean up all data for session
         if (activeClients.has(sessionId)) {
             const client = activeClients.get(sessionId);
             try {
@@ -779,6 +790,7 @@ app.post('/api/force-cleanup/:sessionId?', async (req, res) => {
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
+    const memoryUsage = process.memoryUsage();
     res.json({
         status: 'healthy',
         timestamp: new Date().toISOString(),
@@ -786,7 +798,12 @@ app.get('/api/health', (req, res) => {
         activeSessions: activeClients.size,
         pendingQrSessions: qrCodes.size,
         initializingSessions: clientInitializing.size,
-        memory: process.memoryUsage()
+        temporaryFiles: temporaryFiles.size,
+        memory: {
+            rss: `${Math.round(memoryUsage.rss / 1024 / 1024)} MB`,
+            heapTotal: `${Math.round(memoryUsage.heapTotal / 1024 / 1024)} MB`,
+            heapUsed: `${Math.round(memoryUsage.heapUsed / 1024 / 1024)} MB`
+        }
     });
 });
 
@@ -811,17 +828,18 @@ app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
     console.log(`📱 WhatsApp Bulk Sender API Started`);
     console.log(`🌐 Base URL: http://localhost:${PORT}`);
-    console.log(`📎 File upload support enabled`);
+    console.log(`📎 File upload support enabled (Memory Storage)`);
+    console.log(`🗑️  Automatic file cleanup enabled`);
     console.log(`🇧🇩 Bangladesh number support enabled`);
     console.log(`📋 Supported formats: 01981380806, 8801981380806, +8801981380806, 1981380806`);
-    console.log(`💡 Make sure to allow the required permissions for WhatsApp Web`);
 });
 
 // Handle graceful shutdown
 process.on('SIGINT', async () => {
     console.log('\n🛑 Shutting down server gracefully...');
+    console.log(`🧹 Cleaning up ${temporaryFiles.size} temporary files...`);
+    temporaryFiles.clear();
 
-    // Destroy all active clients
     for (const [sessionId, client] of activeClients) {
         try {
             await client.destroy();
