@@ -21,6 +21,7 @@ cd whatsapp-bulk-sender
 2. **Install dependencies**
 ```bash
 # Backend
+cd backend
 npm install
 
 # Frontend
