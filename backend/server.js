@@ -827,7 +827,7 @@ app.use('*', (req, res) => {
 app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
     console.log(`📱 WhatsApp Bulk Sender API Started`);
-    console.log(`🌐 Base URL: http://localhost:${PORT}`);
+    console.log(`🌐 Base URL: https://whatsblast-engine.vercel.app/:${PORT}`);
     console.log(`📎 File upload support enabled (Memory Storage)`);
     console.log(`🗑️  Automatic file cleanup enabled`);
     console.log(`🇧🇩 Bangladesh number support enabled`);

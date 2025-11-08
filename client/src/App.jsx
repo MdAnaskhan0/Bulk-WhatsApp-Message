@@ -13,7 +13,7 @@ function App() {
   const [clientInfo, setClientInfo] = useState(null);
   const [status, setStatus] = useState('disconnected');
 
-  const API_BASE = 'http://localhost:5000/api';
+  const API_BASE = 'https://whatsblastengin.onrender.com';
 
   // Check status on component mount
   useEffect(() => {
